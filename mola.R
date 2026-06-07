@@ -7,10 +7,12 @@ if(!require("reticulate")) install.packages("reticulate")
 if(!require("dplyr")) install.packages("dplyr")
 if(!require("vegan")) install.packages("vegan")
 if(!require("nlme")) install.packages("nlme")
+if(!require("survival")) install.packages("survival")
 library(reticulate)
 library(dplyr)
 library(vegan)
 library(nlme)
+library(survival)
 
 # create or load environment
 envname <- "matilda-env"
@@ -582,7 +584,7 @@ run_harmonic_PH <- function(df, metr = 'correlation', alpha=0.2, log_str, log_fi
 }
 
 # run mola on a gene-omic dataframe "df"
-run_mola <- function(df, results_dir = '.', alpha = 1.0, verbose = T){
+run_mola <- function(df, results_dir = '..', alpha = 1.0, verbose = T){
   
   if(verbose)
   {
@@ -644,11 +646,33 @@ run_mola <- function(df, results_dir = '.', alpha = 1.0, verbose = T){
   
 }
 
+# filter a (joint sample) diagram for significant loops based on the
+# universal null procedure (with a fixed threshold)
+filter_loops <- function(diagram, alpha = 0.05){
+  
+  # define constants
+  A <- 1
+  lambd <- digamma(1)
+  
+  # run procedure
+  pi <- diagram$death/diagram$birth
+  loglog_pi <- log(log(pi))
+  Lbar <- mean(loglog_pi, na.rm = T)
+  B <- lambd - A*Lbar # negative value
+  test_statistics <- A*loglog_pi + B
+  pvals <- exp(-1*exp(test_statistics))
+  
+  # filter
+  return(diagram[which(pvals < alpha), ])
+  
+}
+
 # run a covariate shift analysis on mola results
 # "weights" is a matrix with one row per loop, columns being the genes and entries being the weights (from gene_weights.RData files output from run_mola)
-# "pheno" is a dataframe with one row per loop storing the sample-level statistics for each loop
-# "genes" is the vector of shared genes
-covariate_shift_analysis <- function(weights, pheno, genes){
+# "pheno" is a dataframe with one row per loop containing the sample-level statistics
+# "genes" is the vector of shared genes, corresponding to the rows of weights
+# "results_dir" is the path of where to save the result file, tvals.RData
+covariate_shift_analysis <- function(weights, pheno, genes, results_dir){
   
   # run modelling in a loop
   get_gene_t_for_term <- function(models, term, gene_ids = NULL) {
@@ -710,6 +734,7 @@ covariate_shift_analysis <- function(weights, pheno, genes){
     
   })
   
+  # MODIFY FOR YOUR VARIABLES
   int_tvals <- get_gene_t_for_term(models, "(Intercept)", genes)
   age_tvals <- get_gene_t_for_term(models, "age", genes)
   afr_tvals <- get_gene_t_for_term(models, "ethnicityAfrican American", genes)
@@ -717,9 +742,82 @@ covariate_shift_analysis <- function(weights, pheno, genes){
   afr_dis_tvals <- get_gene_t_for_term(models, "ethnicityAfrican American:diseaseFlu-infected", genes)
   age_dis_tvals <- get_gene_t_for_term(models, "age:diseaseFlu-infected", genes)
   
+  # MODIFY FOR YOUR VARIABLES
   # save to file
   save(list = c("int_tvals", "age_tvals", "afr_tvals", "dis_tvals", "afr_dis_tvals", "age_dis_tvals"), file = paste0(results_dir, '/tvals.RData'))
   
 }
+
+# run a survival analysis on mola results
+# "surv_data" is a dataframe with one row per loop containing the sample-level statistics and survival data
+# "weights" is a matrix with one row per loop, columns being the genes and entries being the weights (from gene_weights.RData files output from run_mola)
+# "genes" is the vector of shared genes, corresponding to the rows of weights
+survival_analysis <- function(surv_data, weights, genes){
+  
+  pvals <- c()
+  for(i in 1:length(genes))
+  {
+    g <- genes[[i]]
+    temp <- surv_data
+    temp$gene_weight <- unname(weights[i, ])
+    
+    # MODIFY FOR YOUR ANALYSIS
+    f <- as.formula(paste0(
+      "Surv(PFI.time, PFI) ~ pathologic_stage + breast_carcinoma_estrogen_receptor_status + lab_proc_her2_neu_immunohistochemistry_receptor_status + gene_weight"
+    ))
+    
+    tryCatch(expr = {
+      
+      # Cox regression
+      res <- summary(coxph(
+        formula = f,
+        data = temp
+      ))
+      n <- nrow(res$coefficients)
+      pvals <- c(pvals, res$coefficients[n, 5L])
+      
+    }, error = function(e){
+      
+      # if there was an error, add p-value 1
+      pvals <- c(pvals, 1)
+      
+    })
+    
+  }
+  
+  signif_inds <- which(p.adjust(pvals, method = "BH") < 0.05)
+  if(length(signif_inds) == 0)
+  {
+    return(list())
+  }
+  
+  # refit just the models for the significant genes
+  signif_genes <- genes[signif_inds]
+  res <- lapply(X = signif_inds, FUN = function(X){
+    
+    g <- genes[[i]]
+    temp <- surv_data
+    temp$gene_weight <- unname(weights[i, ])
+    
+    # MODIFY FOR YOUR ANALYSIS
+    f <- as.formula(paste0(
+      "Surv(PFI.time, PFI) ~ pathologic_stage + breast_carcinoma_estrogen_receptor_status + lab_proc_her2_neu_immunohistochemistry_receptor_status + gene_weight"
+    ))
+    
+    # Cox regression
+    res <- summary(coxph(
+      formula = f,
+      data = temp
+    ))
+    
+    return(res)
+    
+  })
+  names(res) <- signif_genes
+  
+  return(res)
+  
+}
+
 
 
