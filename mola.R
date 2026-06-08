@@ -6,11 +6,15 @@ set.seed(123)
 if(!require("reticulate")) install.packages("reticulate")
 if(!require("dplyr")) install.packages("dplyr")
 if(!require("vegan")) install.packages("vegan")
+if(!require("ggplot2")) install.packages("ggplot2")
+if(!require("viridis")) install.packages("viridis")
 if(!require("nlme")) install.packages("nlme")
 if(!require("survival")) install.packages("survival")
 library(reticulate)
 library(dplyr)
 library(vegan)
+library(ggplot2)
+library(viridis)
 library(nlme)
 library(survival)
 
@@ -414,10 +418,48 @@ def _get_edge_weights(K, edge_chain):
 
               ")
 
-# correlation distance matrix with missing values
-get_dist_mat <- function(df){
+# correlation distance matrix, allowing for missing values
+get_dist_mat <- function(df, testing = F){
   
-  D <- 1 - cor(t(as.matrix(df)))
+  if(testing)
+  {
+    return(as.matrix(dist(df))) # Euclidean distance, NOT for regular MOLA analyses
+  }
+  
+  if(length(which(complete.cases(df) == F)) == 0)
+  {
+    D <- 1 - cor(t(as.matrix(df)))
+    return(D)
+  }
+  
+  # otherwise, do correlation overlaps
+  min_overlap <- Inf
+  N <- nrow(df)
+  D <- matrix(data = 0, nrow = N, ncol = N)
+  non_missing_inds <- lapply(1:N, FUN = function(X){return(which(!is.na(df[X, ])))})
+  for(i in 1:(N-1))
+  {
+    for(j in (i+1):N)
+    {
+      non_missing_inds_overlap <- intersect(non_missing_inds[[i]], non_missing_inds[[j]])
+      if(length(non_missing_inds_overlap) < min_overlap)
+      {
+        min_overlap <- length(non_missing_inds_overlap)
+      }
+      if(length(non_missing_inds_overlap) <= 2)
+      {
+        v <- 2 # maximal distance
+      }else
+      {
+        v_i <- df[i, non_missing_inds_overlap]
+        v_j <- df[j, non_missing_inds_overlap]
+        v <- 1 - cor(v_i, v_j, method = "pearson")
+      }
+      D[i,j] <- v
+      D[j,i] <- v
+    }
+  }
+  print(paste0("Minimum overlap length: ", min_overlap))
   return(D)
   
 }
@@ -584,11 +626,16 @@ run_harmonic_PH <- function(df, metr = 'correlation', alpha=0.2, log_str, log_fi
 }
 
 # run mola on a gene-omic dataframe "df"
-run_mola <- function(df, results_dir = '..', alpha = 1.0, verbose = T){
+run_mola <- function(df, results_dir = '..', alpha = 1.0, verbose = T, testing = F){
   
   if(verbose)
   {
     print(paste0('Starting MOLA analysis at ', Sys.time(), ' with alpha = ', alpha, '.\n'))
+  }
+  
+  if(!file.exists(results_dir))
+  {
+    dir.create(results_dir)
   }
   
   # write to log
@@ -597,7 +644,14 @@ run_mola <- function(df, results_dir = '..', alpha = 1.0, verbose = T){
   cat(log_str, file = log_filepath, append = TRUE)
   
   # run wrapper function
-  res <- run_harmonic_PH(df, 'correlation', alpha, log_str, log_filepath)
+  if(testing)
+  {
+    res <- run_harmonic_PH(df, 'euclidean', alpha, log_str, log_filepath)
+  }else
+  {
+    res <- run_harmonic_PH(df, 'correlation', alpha, log_str, log_filepath)
+  }
+  
   
   # check and save features
   point_weights_mat <- res$point_weights_mat
@@ -667,6 +721,28 @@ filter_loops <- function(diagram, alpha = 0.05){
   
 }
 
+# visualize one loop - can adjust for desired plotting parameters
+# df is the dataset from which the loop was computed (must have no missing values)
+# weight_vector is the weight vector for the particular loop (values between 0 and 1)
+visualize_loop <- function(df, weight_vector, testing = F){
+  
+  # ensure max weight is 1
+  weight_vector <- weight_vector/max(weight_vector)
+  
+  # compute distance matrix assuming no missing values
+  D <- get_dist_mat(df, testing)
+  
+  # create embedding with vegan
+  emb <- vegan::wcmdscale(d = D, k = 2, w = weight_vector)
+  emb <- as.data.frame(emb)
+  
+  # plot
+  p <- ggplot(data = emb, aes(x = V1, y = V2,color = weight_vector, alpha = weight_vector, size = 10*weight_vector)) + geom_point() + xlab("Loop dimension 1") + ylab("Loop dimension 2") +
+    scale_color_viridis() + scale_alpha_identity()
+  plot(p)
+  
+}
+
 # run a covariate shift analysis on mola results
 # "weights" is a matrix with one row per loop, columns being the genes and entries being the weights (from gene_weights.RData files output from run_mola)
 # "pheno" is a dataframe with one row per loop containing the sample-level statistics
@@ -678,6 +754,10 @@ covariate_shift_analysis <- function(weights, pheno, genes, results_dir){
   get_gene_t_for_term <- function(models, term, gene_ids = NULL) {
     tvals <- vapply(models, function(z) {
       ind <- which(names(z) == term)
+      if(length(ind) == 0)
+      {
+        stop(paste0("Term ", term, " not found in model coefficients."))
+      }
       return(z[[ind]])
     }, numeric(1))
     if (!is.null(gene_ids)) names(tvals) <- gene_ids
@@ -688,7 +768,7 @@ covariate_shift_analysis <- function(weights, pheno, genes, results_dir){
   # fit models predicting the harmonic weights for all genes based on sample-level statistics
   # MODIFY MODELLING FOR YOUR OWN APPLICATION
   dat <- pheno
-  models <- lapply(X = 1:num_genes, FUN = function(X){
+  models <- lapply(X = 1:length(genes), FUN = function(X){
     
     gene_weights <- weights[X, ]
     

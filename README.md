@@ -58,14 +58,6 @@ In datasets where samples are dominated by a single loop (as was the case in our
 
 The script `mola.R` contains code to run MOLA analyses.
 
-### Requirements
-
-- R >= 4.4.2
-- Tested on Mac OSX and Linux systems - the maTilDA dependency doesn't seem to build on Windows.
-- Significant RAM memory for larger numbers (> 500) of genes.
-
-The top of `mola.R` installs (missing) necessary R packages and sets up the necessary reticulate conda environment - Python 3.13 must be installed on your system prior to running. Additionally, you need to clone the repository [maTilDA](https://github.com/IBM/matilda) into the same parent directory as MOLA.
-
 ### Clone Repository
 
 ```bash
@@ -73,11 +65,21 @@ git clone https://github.com/shaelebrown/MOLA.git
 cd MOLA
 ```
 
+### Requirements
+
+- R >= 4.4.2
+- Tested on Mac OSX and Linux systems - the maTilDA dependency doesn't seem to build on Windows.
+- Significant RAM memory for larger numbers (> 500) of genes.
+
+At startup, `mola.R` installs any missing R package dependencies and configures the required reticulate Conda environment. Before running `mola.R`, ensure that Python 3.13 is installed on your system.
+
+You must also clone the [maTilDA repository](https://github.com/IBM/matilda) into the same parent directory as the MOLA repository.
+
 ---
 
 ## Quick Start
 
-Here is a minimal example of how to identify loops, and their corresponding gene weight vectors, in several multiomic datasets. This code assumes that the directory '../multiomic_datasets' contains files sample1.csv, sample2.csv, ..., sample50.csv, where all rows correspond to the same set (and order) of genes and the columns correspond to the same omic measures (e.g., "RNAseq", "ATACseq", etc.).
+Here is a minimal example of how to identify loops, and their corresponding gene weight vectors, in several multiomic datasets. This code assumes that the directory `../multiomic_datasets` contains files `sample1.csv`, `sample2.csv`, ..., `sample50.csv`, where all rows correspond to the same set (and order) of genes and the columns correspond to the same omic measures (e.g., "RNAseq", "ATACseq", etc.).
 
 ```r
 source("mola.R")
@@ -88,44 +90,58 @@ lapply(X = 1:50, FUN = function(X){
   # read in that sample's data
   # the genes can be the rownames, but should not be in a column "X"
   df <- read.csv(paste0("../multiomic_datasets/sample", X, ".csv"))
+  df$X <- NULL
   
   # assume directory "../mola_results" already exists
   results_dir <- paste0("../mola_results/sample", X)
   
   # run MOLA and save results
   # keep all loops to jointly filter across all samples
+  # if data contains missing values a message will be printed with the
+  # minimum number of shared non-missing entries in all pairs of rows 
+  # in the dataset
   run_mola(df = df, results_dir = results_dir, alpha = 1.0, verbose = T)
 
 })
 
 ```
 
-Results for sample `X` will be saved in the directory "../mola_results/sample`X`", with the following files:
+Results for sample `X` will be saved in the directory `../mola_results/sampleX`, with the following files:
 
-- **gene_weights.RData** - the gene weights for each identified (and retained if $alpha < 1$) loop. Loading this file will create an object called `point_weights_mat`, in which rows are the genes (in the same row order as all the samples), columns are the loop (named by loop key) and entries are the weights. 
-- **gene_interaction_weights.RData** - the gene interaction (i.e., edge) weights for each loop.
-- **persistence_diagram.csv** - the computed persistence diagram with loop key as a column.
-- **params.RData** - the alpha and enclosing radius used in calculations.
-- **log.txt** - informative messages and diagnostics in the case of errors.
+- `gene_weights.RData` - the gene weights for each identified (and retained if $alpha < 1$) loop. Loading this file will create a variable called `point_weights_mat`, in which rows are the genes (in the same row order as all the samples), columns are the loop (named by loop key) and entries are the weights. 
+- `gene_interaction_weights.RData` - the gene interaction (i.e., edge) weights for each loop.
+- `persistence_diagram.csv` - the computed persistence diagram with loop key as a column.
+- `params.RData` - the alpha and enclosing radius used in calculations.
+- `log.txt` - informative messages and diagnostics in the case of errors.
+
+If no loops were found in the dataset, only the files `log.txt` and `params.txt` will be generated.
 
 To filter loops jointly across all samples, you can use the `filter_loops` function, like so:
 
 ```r
 # read in the diagrams for all samples
-joint_diagram <- lapply(X = 1:50, FUN = function(X){
+joint_diagram <- do.call(rbind, lapply(X = 1:50, FUN = function(X){
 
-  diag <- read.csv(paste0('../mola_results/sample', X, '/persistence_diagram.csv'))
-  diag$samp <- X
+  fname <- paste0('../mola_results/sample', X, '/persistence_diagram.csv')
+  if(file.exists(fname))
+  {
+    diag <- read.csv(paste0('../mola_results/sample', X, '/persistence_diagram.csv'))
+    diag$samp <- X
+  }else
+  {
+    diag <- data.frame(birth = numeric(), death = numeric(), p_value = numeric(), key = numeric(), samp = numeric())
+  }
+  
   return(diag)
 
-})
+}))
 
 # filter loops - subsets joint_diagram for loop p-values < 0.05
 filtered_diagram <- filter_loops(diagram = joint_diagram, alpha = 0.05)
 
 # the columns "samp" and "key" will give the necessary identifiers for
 # using retained loops
-weights <- do.call(rbind, lapply(X = 1:nrow(filtered_diagram), FUN = function(X){
+weights <- do.call(cbind, lapply(X = 1:nrow(filtered_diagram), FUN = function(X){
 
   samp <- filtered_diagram$samp[[X]]
   key <- filtered_diagram$key[[X]]
@@ -134,21 +150,45 @@ weights <- do.call(rbind, lapply(X = 1:nrow(filtered_diagram), FUN = function(X)
   load(paste0("../mola_results/sample", samp, "/gene_weights.RData"))
   harmonic_weights <- point_weights_mat[, as.character(key)]
   harmonic_weights <- harmonic_weights/max(harmonic_weights)
-  return(matrix(data = harmonic_weights, columns = 1))
+  return(matrix(data = harmonic_weights, ncol = 1))
 
 }))
 
 ```
 
-For covariate shift analysis you will need to modify the *covariate_shift_analysis* function to adjust for your own covariates and modelling procedures - outputs will be a file **tvals.RData** stored in a user-supplied results directory:
+The `plot_loop` function can aid in the visualization of loop patterns:
+
+```r
+# visualize the first retained loop in filtered_diagram
+# get sample number and loop key
+samp <- filtered_diagram$samp[[1]]
+key <- filtered_diagram$key[[1]]
+
+# read in the dataset for that sample
+df <- read.csv(paste0('../multiomic_datasets/sample', samp, '.csv'))
+df$X <- NULL
+
+# load the weight vector
+loop_weight_vec <- weights[, 1L]
+
+# plot visualization
+visualize_loop(df = df, weight_vector = loop_weight_vec)
+
+```
+
+![](figures/loop.png)
+
+For covariate shift analysis you will need to modify the `covariate_shift_analysis` function to adjust for your own covariates and modelling procedures - outputs will be a file `tvals.RData` stored in a user-supplied results directory:
 
 ```r
 # read in sample-level statistics file
 pheno <- read.csv('../pheno.csv')
+pheno$ethnicity <- factor(pheno$ethnicity, levels = c("European American", "African American"))
+pheno$disease <- factor(pheno$disease, levels = c("Non-infected", "Flu-infected"))
 
 # match with retained loops, assuming "samp" is the sample ID column in
 # both dataframes
-pheno <- merge(filtered_loops, pheno, by = c("samp"))
+pheno <- merge(filtered_diagram, pheno, by = c("samp"))
 
 # read in or define gene vector, corresponding to the rows of "weights"
 genes <- c("ERLIN2", "CLIC6", "SCGB2A2", "GSTM1", "ZNF703", 
@@ -166,17 +206,18 @@ genes <- c("ERLIN2", "CLIC6", "SCGB2A2", "GSTM1", "ZNF703",
 results_dir <- "../mola_results"
            
 # run the covariate shift analysis
-covariate_shift_analysis(weights = weights, pheno = pheno, genes = genes)
+covariate_shift_analysis(weights = weights, pheno = pheno, genes = genes, results_dir = results_dir)
 
 # load the results
 load(paste0(results_dir, '/tvals.RData'))
 
 # variables are named lists of gene t-values, each in decreasing order
+# these lists can be input to GSEA analyses
 age_tvals[1:5] # these variables depend on your modifications
 
 ```
 
-For a survival analysis, you will need to modify the *survival_analysis* function to adjust for your own covariates and modelling procedures - outputs will be a list, either empty if no genes are significant after FDR correction (at the $\alpha = 0.05$ level) or named for significant genes as the Cox model results for those genes.
+For a survival analysis, you will need to modify the `survival_analysis` function to adjust for your own covariates and modelling procedures - outputs will be a list, either empty if no genes are significant after FDR correction (at the $\alpha = 0.05$ level) or named for significant genes as the Cox model results for those genes.
 
 ```r
 # assuming pheno contains survival data columns PFI and PFI.time:
