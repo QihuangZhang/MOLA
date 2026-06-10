@@ -10,6 +10,15 @@ if(!require("ggplot2")) install.packages("ggplot2")
 if(!require("viridis")) install.packages("viridis")
 if(!require("nlme")) install.packages("nlme")
 if(!require("survival")) install.packages("survival")
+if(!require("org.Hs.eg.db")) install.packages("org.Hs.eg.db")
+if(!require("AnnotationDbi")) install.packages("AnnotationDbi")
+if(!require("stringr")) install.packages("stringr")
+if(!require("lmtest")) install.packages("lmtest")
+if(!require("GO.db")) install.packages("GO.db")
+if(!require("KEGGREST")) install.packages("KEGGREST")
+if(!require("tidyr")) install.packages("tidyr")
+if(!require("purrr")) install.packages("purrr")
+if(!require("reactome.db")) install.packages("reactome.db")
 library(reticulate)
 library(dplyr)
 library(vegan)
@@ -17,6 +26,15 @@ library(ggplot2)
 library(viridis)
 library(nlme)
 library(survival)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(stringr)
+library(lmtest)
+library(GO.db)
+library(KEGGREST)
+library(tidyr)
+library(purrr)
+library(reactome.db)
 
 # create or load environment
 envname <- "matilda-env"
@@ -419,6 +437,8 @@ def _get_edge_weights(K, edge_chain):
               ")
 
 # correlation distance matrix, allowing for missing values
+# "df" is the multiomic dataset with rows corresponding to the genes
+# function output is the correlation distance matrix
 get_dist_mat <- function(df, testing = F){
   
   if(testing)
@@ -465,6 +485,13 @@ get_dist_mat <- function(df, testing = F){
 }
 
 # main wrapper function
+# "df" is the multiomic dataset with rows corresponding to the genes
+# "metr" is the metric used for distance calculations, and should NOT be modified
+# "alpha" is the p-value threshold for filtering
+# "log_str" is the log string for storing diagnostic information
+# "log_filepath" is the location where log_str should be saved
+# "top" is a maTilDA parameter and should not be modified
+# function output is a list of all maTilDA outputs and the log information
 run_harmonic_PH <- function(df, metr = 'correlation', alpha=0.2, log_str, log_filepath, top = NULL){
   tryCatch(expr = {
     
@@ -626,12 +653,14 @@ run_harmonic_PH <- function(df, metr = 'correlation', alpha=0.2, log_str, log_fi
 }
 
 # run mola on a gene-omic dataframe "df"
-run_mola <- function(df, results_dir = '..', alpha = 1.0, verbose = T, testing = F){
+# "df" is the multiomic dataset with rows corresponding to the genes
+# "results_dir" is the location where the output should be saved
+# "alpha" is the p-value threshold for filtering - default is 1 so all loops are retained
+#.        and filtering can be done across all samples after MOLA processing
+# function has no output - results are saved to files in results_dir
+run_mola <- function(df, results_dir = '..', alpha = 1.0, testing = F){
   
-  if(verbose)
-  {
-    print(paste0('Starting MOLA analysis at ', Sys.time(), ' with alpha = ', alpha, '.\n'))
-  }
+  print(paste0('Starting MOLA analysis at ', Sys.time(), ' with alpha = ', alpha, '.\n'))
   
   if(!file.exists(results_dir))
   {
@@ -702,6 +731,9 @@ run_mola <- function(df, results_dir = '..', alpha = 1.0, verbose = T, testing =
 
 # filter a (joint sample) diagram for significant loops based on the
 # universal null procedure (with a fixed threshold)
+# "diagram" is the persistence diagram to filter with (at least) columns birth and death
+# "alpha" is the p-value threshold for filtering
+# function output is the diagram subset for loop p-values < alpha
 filter_loops <- function(diagram, alpha = 0.05){
   
   # define constants
@@ -722,8 +754,9 @@ filter_loops <- function(diagram, alpha = 0.05){
 }
 
 # visualize one loop - can adjust for desired plotting parameters
-# df is the dataset from which the loop was computed (must have no missing values)
-# weight_vector is the weight vector for the particular loop (values between 0 and 1)
+# "df" is the dataset from which the loop was computed (must have no missing values)
+# "weight_vector" is the weight vector for the particular loop (values between 0 and 1)
+# function has no output - plot is generated
 visualize_loop <- function(df, weight_vector, testing = F){
   
   # ensure max weight is 1
@@ -748,6 +781,7 @@ visualize_loop <- function(df, weight_vector, testing = F){
 # "pheno" is a dataframe with one row per loop containing the sample-level statistics
 # "genes" is the vector of shared genes, corresponding to the rows of weights
 # "results_dir" is the path of where to save the result file, tvals.RData
+# function has no output, saves results to file
 covariate_shift_analysis <- function(weights, pheno, genes, results_dir){
   
   # run modelling in a loop
@@ -832,6 +866,7 @@ covariate_shift_analysis <- function(weights, pheno, genes, results_dir){
 # "surv_data" is a dataframe with one row per loop containing the sample-level statistics and survival data
 # "weights" is a matrix with one row per loop, columns being the genes and entries being the weights (from gene_weights.RData files output from run_mola)
 # "genes" is the vector of shared genes, corresponding to the rows of weights
+# function output is a named list, one element for each significant gene, with its Cox regression results
 survival_analysis <- function(surv_data, weights, genes){
   
   pvals <- c()
@@ -899,5 +934,413 @@ survival_analysis <- function(surv_data, weights, genes){
   
 }
 
+# generate a GSEA term map for GO, KEGG and Reactome
+# "genes" is the vector of genes
+# function output is a binary membership matrix with rows being GSEA pathways/terms and
+#                    columns being genes (entries are 0/1). Rownames are the terms and
+#                    column names are the genes
+generate_term_map <- function(genes){
+  
+  map_genes_to_entrez <- function(genes,
+                                  orgdb = org.Hs.eg.db,
+                                  verbose = TRUE) {
+    genes <- unique(as.character(genes))
+    genes <- genes[!is.na(genes)]
+    genes <- trimws(genes)
+    genes <- genes[genes != ""]
+    
+    # Split Ensembl-like IDs (strip ENSG... .12)
+    ensembl <- genes[stringr::str_detect(genes, "^ENSG")]
+    ensembl <- sub("\\..*$", "", ensembl)
+    
+    sym_like <- genes[!stringr::str_detect(genes, "^ENSG")]
+    
+    # ---- SYMBOL mapping (this is safe; select returns NA rows but doesn’t error) ----
+    m_sym <- AnnotationDbi::select(
+      orgdb,
+      keys    = sym_like,
+      keytype = "SYMBOL",
+      columns = c("ENTREZID", "SYMBOL")
+    )
+    
+    sym_mapped   <- unique(m_sym$SYMBOL[!is.na(m_sym$ENTREZID)])
+    sym_unmapped <- setdiff(sym_like, sym_mapped)
+    
+    # ---- ALIAS mapping (can ERROR if none of the keys are valid ALIAS keys) ----
+    m_alias <- data.frame(ENTREZID=character(), SYMBOL=character(), ALIAS=character())
+    
+    if (length(sym_unmapped) > 0) {
+      m_alias_try <- tryCatch(
+        AnnotationDbi::select(
+          orgdb,
+          keys    = sym_unmapped,
+          keytype = "ALIAS",
+          columns = c("ENTREZID", "SYMBOL", "ALIAS")
+        ),
+        error = function(e) e
+      )
+      
+      if (!inherits(m_alias_try, "error")) {
+        m_alias <- m_alias_try
+      } else if (verbose) {
+        message("ALIAS mapping skipped: ", m_alias_try$message)
+      }
+    }
+    
+    # ---- ENSEMBL mapping (also can ERROR if none keys are valid ENSEMBL keys) ----
+    m_ens <- data.frame(ENTREZID=character(), SYMBOL=character(), ENSEMBL=character())
+    
+    if (length(ensembl) > 0) {
+      m_ens_try <- tryCatch(
+        AnnotationDbi::select(
+          orgdb,
+          keys    = unique(ensembl),
+          keytype = "ENSEMBL",
+          columns = c("ENTREZID", "SYMBOL", "ENSEMBL")
+        ),
+        error = function(e) e
+      )
+      
+      if (!inherits(m_ens_try, "error")) {
+        m_ens <- m_ens_try
+      } else if (verbose) {
+        message("ENSEMBL mapping skipped: ", m_ens_try$message)
+      }
+    }
+    
+    # ---- Combine into one mapping table ----
+    m_sym2 <- dplyr::as_tibble(m_sym) %>%
+      dplyr::filter(!is.na(ENTREZID)) %>%
+      dplyr::mutate(map_source = "SYMBOL", input_id = SYMBOL) %>%
+      dplyr::select(input_id, SYMBOL, ENTREZID, map_source)
+    
+    m_alias2 <- dplyr::as_tibble(m_alias) %>%
+      dplyr::filter(!is.na(ENTREZID)) %>%
+      dplyr::mutate(map_source = "ALIAS", input_id = ALIAS) %>%
+      dplyr::select(input_id, SYMBOL, ENTREZID, map_source)
+    
+    m_ens2 <- dplyr::as_tibble(m_ens) %>%
+      dplyr::filter(!is.na(ENTREZID)) %>%
+      dplyr::mutate(map_source = "ENSEMBL", input_id = ENSEMBL) %>%
+      dplyr::select(input_id, SYMBOL, ENTREZID, map_source)
+    
+    map_tbl <- dplyr::bind_rows(m_sym2, m_alias2, m_ens2) %>%
+      dplyr::distinct(ENTREZID, .keep_all = TRUE)
+    
+    entrez <- unique(map_tbl$ENTREZID)
+    
+    if (verbose) {
+      n_in <- length(genes)
+      n_entrez <- length(entrez)
+      pct <- if (n_in == 0) 0 else round(100 * n_entrez / n_in, 2)
+      
+      message("---- Mapping summary ----")
+      message("Input IDs:     ", n_in)
+      message("Mapped Entrez: ", n_entrez, " (", pct, "% of input IDs)")
+      if (nrow(map_tbl) > 0) {
+        message("Sources:       ",
+                paste(names(table(map_tbl$map_source)), table(map_tbl$map_source),
+                      sep="=", collapse=", "))
+      } else {
+        message("Sources:       none (no mappings)")
+      }
+      
+      mapped_inputs <- unique(map_tbl$input_id)
+      unmapped_inputs <- setdiff(genes, mapped_inputs)
+      if (length(unmapped_inputs) > 0) {
+        message("Example unmapped (first 20): ", paste(head(unmapped_inputs, 20), collapse = ", "))
+      }
+    }
+    
+    list(entrez = entrez, map_tbl = map_tbl)
+  }
+  
+  map_all <- map_genes_to_entrez(genes, verbose = TRUE)$map_tbl
+  entrez_ids <- map_all$ENTREZID
+  
+  # get the GO/KEGG/Reactome pathways/terms for these genes
+  
+  # start with GO
+  go_map <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys = unname(entrez_ids),
+    keytype = "ENTREZID",
+    columns = c("GO", "ONTOLOGY")
+  )
+  
+  # Add GO term names
+  go_terms <- AnnotationDbi::select(
+    GO.db,
+    keys = unique(go_map$GO),
+    keytype = "GOID",
+    columns = c("TERM")
+  )
+  
+  # Merge
+  go_map <- merge(go_map, go_terms,
+                  by.x = "GO",
+                  by.y = "GOID",
+                  all.x = TRUE)
+  
+  go_map$EVIDENCE <- NULL
+  
+  unique_go_terms <- unique(go_map$TERM)
+  unique_go_terms <- unique_go_terms[which(!is.na(unique_go_terms))]
+  go_matrix <- do.call(rbind,lapply(unique_go_terms, FUN = function(X){
+    
+    ts <- unique(unlist(go_map[which(go_map$TERM == X), "ENTREZID"]))
+    ts_inds <- match(ts, entrez_ids)
+    v <- rep(0, length(entrez_ids))
+    v[ts_inds] <- 1
+    return(matrix(data = v, nrow = 1))
+    
+  }))
+  rownames(go_matrix) <- paste("GO - ", unique_go_terms, sep = "")
+  colnames(go_matrix) <- genes
+  
+  # Convert Entrez -> KEGG gene IDs
+  kegg_gene_ids <- paste0("hsa:", entrez_ids)
+  
+  # gene -> pathway links
+  kegg_links <- map_df(kegg_gene_ids, function(g) {
+    
+    pathways <- KEGGREST::keggLink("pathway", g)
+    
+    if(length(pathways) == 0) {
+      return(NULL)
+    }
+    
+    tibble(
+      kegg_gene = names(pathways),
+      pathway_id = pathways,
+      ENTREZID = sub("hsa:", "", names(pathways))
+    )
+  })
+  kegg_links$pathway_id <- unlist(lapply(strsplit(kegg_links$pathway_id, split = "path:"), '[[', 2))
+  
+  # Add pathway names
+  pathway_names <- KEGGREST::keggList("pathway", "hsa")
+  
+  kegg_map <- kegg_links %>%
+    mutate(
+      pathway_name = pathway_names[pathway_id]
+    )
+  
+  unique_kegg_terms <- unique(kegg_map$pathway_name)
+  unique_kegg_terms <- unique_kegg_terms[which(!is.na(unique_kegg_terms))]
+  kegg_matrix <- do.call(rbind,lapply(unique_kegg_terms, FUN = function(X){
+    
+    ts <- unique(unlist(kegg_map[which(kegg_map$pathway_name == X), "ENTREZID"]))
+    ts_inds <- match(ts, entrez_ids)
+    v <- rep(0, length(entrez_ids))
+    v[ts_inds] <- 1
+    return(matrix(data = v, nrow = 1))
+    
+  }))
+  rownames(kegg_matrix) <- paste("KEGG - ", unique_kegg_terms, sep = "")
+  colnames(kegg_matrix) <- genes
+  
+  reactome_map <- AnnotationDbi::select(
+    reactome.db,
+    keys = entrez_ids,
+    keytype = "ENTREZID",
+    columns = c("PATHID", "PATHNAME")
+  )
+  reactome_map <- reactome_map[which(!is.na(reactome_map$PATHNAME)),]
+  
+  unique_reactome_terms <- unique(reactome_map$PATHNAME)
+  
+  reactome_matrix <- do.call(rbind,lapply(unique_reactome_terms, FUN = function(X){
+    
+    ts <- unique(unlist(reactome_map[which(reactome_map$pathway_name == X), "ENTREZID"]))
+    ts_inds <- match(ts, entrez_ids)
+    v <- rep(0, length(entrez_ids))
+    v[ts_inds] <- 1
+    return(matrix(data = v, nrow = 1))
+    
+  }))
+  rownames(reactome_matrix) <- paste("Reactome - ", unique_reactome_terms, sep = "")
+  colnames(reactome_matrix) <- genes
+  
+  # combine
+  term_map <- do.call(rbind,list(go_matrix, kegg_matrix, reactome_matrix))
+  return(term_map)
+  
+}
 
+# Fourier enrichment of a loop
+# "df" is the multiomic dataframe of the sample that the loop was computed from, and must
+#.     have rownames, all of which are in the "genes" vector
+# "genes" is the vector of gene names
+# "weight_vector" is the weight vector for the specific loop
+# "term_map" is a binary membership matrix with rows being GSEA pathways/terms and
+#            columns being genes (entries are 0/1). Rownames should be the terms and
+#            column names should be the genes
+# "id2entrez_vec" are the entrez IDs of the genes - can supply if precomputed by this function -
+#                 it is one of the returned list elements
+# function output is a named list of the FDR adjusted term p-values and the id2entrez_vec
+fourier_enrichment <- function(df, genes, weight_vector, term_map, id2entrez_vec = NULL){
+  
+  # map all genes to entrez IDs if vector not supplied
+  if(is.null(id2entrez_vec))
+  {
+    map_genes_to_entrez <- function(genes,
+                                    orgdb = org.Hs.eg.db,
+                                    verbose = TRUE) {
+      genes <- unique(as.character(genes))
+      genes <- genes[!is.na(genes)]
+      genes <- trimws(genes)
+      genes <- genes[genes != ""]
+      
+      # Split Ensembl-like IDs (strip ENSG... .12)
+      ensembl <- genes[stringr::str_detect(genes, "^ENSG")]
+      ensembl <- sub("\\..*$", "", ensembl)
+      
+      sym_like <- genes[!stringr::str_detect(genes, "^ENSG")]
+      
+      # ---- SYMBOL mapping (this is safe; select returns NA rows but doesn’t error) ----
+      m_sym <- AnnotationDbi::select(
+        orgdb,
+        keys    = sym_like,
+        keytype = "SYMBOL",
+        columns = c("ENTREZID", "SYMBOL")
+      )
+      
+      sym_mapped   <- unique(m_sym$SYMBOL[!is.na(m_sym$ENTREZID)])
+      sym_unmapped <- setdiff(sym_like, sym_mapped)
+      
+      # ---- ALIAS mapping (can ERROR if none of the keys are valid ALIAS keys) ----
+      m_alias <- data.frame(ENTREZID=character(), SYMBOL=character(), ALIAS=character())
+      
+      if (length(sym_unmapped) > 0) {
+        m_alias_try <- tryCatch(
+          AnnotationDbi::select(
+            orgdb,
+            keys    = sym_unmapped,
+            keytype = "ALIAS",
+            columns = c("ENTREZID", "SYMBOL", "ALIAS")
+          ),
+          error = function(e) e
+        )
+        
+        if (!inherits(m_alias_try, "error")) {
+          m_alias <- m_alias_try
+        } else if (verbose) {
+          message("ALIAS mapping skipped: ", m_alias_try$message)
+        }
+      }
+      
+      # ---- ENSEMBL mapping (also can ERROR if none keys are valid ENSEMBL keys) ----
+      m_ens <- data.frame(ENTREZID=character(), SYMBOL=character(), ENSEMBL=character())
+      
+      if (length(ensembl) > 0) {
+        m_ens_try <- tryCatch(
+          AnnotationDbi::select(
+            orgdb,
+            keys    = unique(ensembl),
+            keytype = "ENSEMBL",
+            columns = c("ENTREZID", "SYMBOL", "ENSEMBL")
+          ),
+          error = function(e) e
+        )
+        
+        if (!inherits(m_ens_try, "error")) {
+          m_ens <- m_ens_try
+        } else if (verbose) {
+          message("ENSEMBL mapping skipped: ", m_ens_try$message)
+        }
+      }
+      
+      # ---- Combine into one mapping table ----
+      m_sym2 <- dplyr::as_tibble(m_sym) %>%
+        dplyr::filter(!is.na(ENTREZID)) %>%
+        dplyr::mutate(map_source = "SYMBOL", input_id = SYMBOL) %>%
+        dplyr::select(input_id, SYMBOL, ENTREZID, map_source)
+      
+      m_alias2 <- dplyr::as_tibble(m_alias) %>%
+        dplyr::filter(!is.na(ENTREZID)) %>%
+        dplyr::mutate(map_source = "ALIAS", input_id = ALIAS) %>%
+        dplyr::select(input_id, SYMBOL, ENTREZID, map_source)
+      
+      m_ens2 <- dplyr::as_tibble(m_ens) %>%
+        dplyr::filter(!is.na(ENTREZID)) %>%
+        dplyr::mutate(map_source = "ENSEMBL", input_id = ENSEMBL) %>%
+        dplyr::select(input_id, SYMBOL, ENTREZID, map_source)
+      
+      map_tbl <- dplyr::bind_rows(m_sym2, m_alias2, m_ens2) %>%
+        dplyr::distinct(ENTREZID, .keep_all = TRUE)
+      
+      entrez <- unique(map_tbl$ENTREZID)
+      
+      if (verbose) {
+        n_in <- length(genes)
+        n_entrez <- length(entrez)
+        pct <- if (n_in == 0) 0 else round(100 * n_entrez / n_in, 2)
+        
+        message("---- Mapping summary ----")
+        message("Input IDs:     ", n_in)
+        message("Mapped Entrez: ", n_entrez, " (", pct, "% of input IDs)")
+        if (nrow(map_tbl) > 0) {
+          message("Sources:       ",
+                  paste(names(table(map_tbl$map_source)), table(map_tbl$map_source),
+                        sep="=", collapse=", "))
+        } else {
+          message("Sources:       none (no mappings)")
+        }
+        
+        mapped_inputs <- unique(map_tbl$input_id)
+        unmapped_inputs <- setdiff(genes, mapped_inputs)
+        if (length(unmapped_inputs) > 0) {
+          message("Example unmapped (first 20): ", paste(head(unmapped_inputs, 20), collapse = ", "))
+        }
+      }
+      
+      list(entrez = entrez, map_tbl = map_tbl)
+    }
+    
+    map_all <- map_genes_to_entrez(genes, verbose = TRUE)$map_tbl
+    
+    # keep one Entrez per input_id (AnnotationDbi can return 1:many; choose a rule)
+    id2entrez <- map_all |>
+      dplyr::filter(!is.na(ENTREZID)) |>
+      dplyr::group_by(input_id) |>
+      dplyr::summarise(ENTREZID = dplyr::first(ENTREZID), .groups = "drop")
+    
+    id2entrez_vec <- id2entrez$ENTREZID
+    names(id2entrez_vec) <- id2entrez$input_id
+    
+    # reorder
+    id2entrez_vec <- id2entrez_vec[genes]
+  }
+  
+  # actual enrichment framework
+  weight_vector <- weight_vector/max(weight_vector)
+  emb <- vegan::wcmdscale(d = 1-cor(t(df)), k = 2, w = weight_vector)
+  theta <- unname(atan2(y = emb[,2], x = emb[,1]))
+  
+  num_bases <- 1
+  fourier_mat <- do.call(cbind,lapply(1:num_bases, FUN = function(X){
+    
+    v1 <- cos(X*theta/(2*pi))
+    v2 <- sin(X*theta/(2*pi))
+    df_fourier <- data.frame(x = v1, y = v2)
+    colnames(df_fourier) <- c(paste0("cos_", X), paste0("sin_", X))
+    return(df_fourier)
+    
+  }))
+  pvals <- apply(term_map, 1L, FUN = function(X){
+    
+    fourier_mod <- lm(data = fourier_mat, formula = X ~ .)
+    base_mod <- lm(data = fourier_mat, formula = X ~ 1)
+    lrt <- lmtest::lrtest(base_mod, fourier_mod)
+    pval <- lrt$`Pr(>Chisq)`[2]
+    return(pval)
+    
+  })
+  pvals_adjusted <- p.adjust(pvals, "BH")
+  names(pvals_adjusted) <- rownames(term_map)
+  
+  return(list(pvals_adjusted = pvals_adjusted, id2entrez_vec = id2entrez_vec))
+  
+}
 
