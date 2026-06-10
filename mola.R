@@ -822,7 +822,7 @@ covariate_shift_analysis <- function(weights, pheno, genes, results_dir){
     tryCatch(expr = {
       
       fit <- lme(
-        fixed  = response ~ age + ethnicity + disease + ethnicity:disease + age:disease,
+        fixed  = response ~ age + ancestry + disease + ancestry:disease + age:disease,
         random = ~ 1 | sample,
         data   = dat,
         na.action = na.omit,
@@ -837,8 +837,8 @@ covariate_shift_analysis <- function(weights, pheno, genes, results_dir){
       if(length(tvals) == 1)
       {
         tvals <- rep(0, 6)
-        names(tvals) <- c("(Intercept)", "age", "ethnicityAfrican American",
-                          "diseaseFlu-infected", "ethnicityAfrican American:diseaseFlu-infected",
+        names(tvals) <- c("(Intercept)", "age", "ancestryAfrican American",
+                          "diseaseFlu-infected", "ancestryAfrican American:diseaseFlu-infected",
                           "age:diseaseFlu-infected")
       }
       
@@ -851,9 +851,9 @@ covariate_shift_analysis <- function(weights, pheno, genes, results_dir){
   # MODIFY FOR YOUR VARIABLES
   int_tvals <- get_gene_t_for_term(models, "(Intercept)", genes)
   age_tvals <- get_gene_t_for_term(models, "age", genes)
-  afr_tvals <- get_gene_t_for_term(models, "ethnicityAfrican American", genes)
+  afr_tvals <- get_gene_t_for_term(models, "ancestryAfrican American", genes)
   dis_tvals <- get_gene_t_for_term(models, "diseaseFlu-infected", genes)
-  afr_dis_tvals <- get_gene_t_for_term(models, "ethnicityAfrican American:diseaseFlu-infected", genes)
+  afr_dis_tvals <- get_gene_t_for_term(models, "ancestryAfrican American:diseaseFlu-infected", genes)
   age_dis_tvals <- get_gene_t_for_term(models, "age:diseaseFlu-infected", genes)
   
   # MODIFY FOR YOUR VARIABLES

@@ -183,7 +183,7 @@ For covariate shift analysis you will need to modify the `covariate_shift_analys
 ```r
 # read in sample-level statistics file
 pheno <- read.csv('../pheno.csv')
-pheno$ethnicity <- factor(pheno$ethnicity, levels = c("European American", "African American"))
+pheno$ancestry <- factor(pheno$ancestry, levels = c("European American", "African American"))
 pheno$disease <- factor(pheno$disease, levels = c("Non-infected", "Flu-infected"))
 
 # match with retained loops, assuming "samp" is the sample ID column in
